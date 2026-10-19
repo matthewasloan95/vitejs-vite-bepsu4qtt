@@ -21,7 +21,20 @@ const DEFAULT_ITEMS = [
   'Solo bw win',
   'Checks for tails when there are none',
   'audible desk slamming',
-  'completely misses tails when walking by them'
+  'completely misses tails when walking by them',
+  'Manchild mention',
+  'Chat crash cause of judas spam',
+  'ELBOOOWWW',
+  'Labors someone',
+  '"REAL" FOOTBALL mention',
+  'Mentioning katsu\'s sleep schedule',
+  'MEHMEHMEH',
+  'Bluestone / failing to get a good first word that comes to mind',
+  'DEL -- POGGG',
+  'Refusing to make an animal noise',
+  '!garlicbread mention',
+  'Stimming Messkeyyyy'
+
 ].join("\n");
 
 // --- Yoshi Egg Color Palette (Classic Yoshi's Island colors) ---
