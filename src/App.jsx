@@ -39,9 +39,9 @@ const DEFAULT_ITEMS = [
   'Heck yeah!',
   'W A T',
   'Tells someone to “get outta here”',
-  'Denies dating slayer',
+  'Denies dating Slayer',
   'Slayer, Elsa, Kang old jokes',
-  'Messkey HO OHHHH laugh (could just be under messkey stimming)',
+  'Messkey HO OHHHH laugh',
   'Denying going to furry events',
 
 ].join("\n");
