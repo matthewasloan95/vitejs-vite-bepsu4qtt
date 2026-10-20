@@ -33,7 +33,16 @@ const DEFAULT_ITEMS = [
   'DEL -- POGGG',
   'Refusing to make an animal noise',
   '!garlicbread mention',
-  'Stimming Messkeyyyy'
+  'Stimming Messkeyyyy',
+  'WHY ARE WE TWERKING',
+  'YOU\'RE THE WORST',
+  'Heck yeah!',
+  'W A T',
+  'Tells someone to “get outta here”',
+  'Denies dating slayer',
+  'Slayer, Elsa, Kang old jokes',
+  'Messkey HO OHHHH laugh (could just be under messkey stimming)',
+  'Denying going to furry events',
 
 ].join("\n");
 
