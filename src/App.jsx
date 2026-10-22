@@ -6,7 +6,6 @@ const DEFAULT_FREE_SPACE = "yelling at petters";
 const DEFAULT_ITEMS = [
   '"SCREW YOU"',
   'slayer brings a tail',
-  'Says to vinvin/ankoku/blanket "what is that"',
   "Doesn't notice a tail for 30min +",
   'Says "I can\'t lie" with little reason for it',
   '"Are you serious/are you joking?"',
@@ -42,7 +41,10 @@ const DEFAULT_ITEMS = [
   'Denies dating Slayer',
   'Slayer, Elsa, Kang old jokes',
   'Messkey HO OHHHH laugh',
-  'Denying going to furry events',
+
+  '"What is that" to a gif/emote',
+  'Furry denial',
+  'LOcationphobia (NY..LU..etc)',
 
 ].join("\n");
 
