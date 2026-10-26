@@ -44,6 +44,7 @@ const DEFAULT_ITEMS = [
   '"What is that" to a gif/emote',
   'Furry denial',
   'LOcationphobia (NY..LU..etc)',
+  'Celebrates a retired T3',
 ].join("\n");
 
 // --- Yoshi Egg Color Palette (Classic Yoshi's Island colors) ---
