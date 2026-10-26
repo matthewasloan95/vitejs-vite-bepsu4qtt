@@ -22,7 +22,7 @@ const DEFAULT_ITEMS = [
   'Audible desk slamming',
   'Completely misses tails when walking by them',
   'Manchild mention',
-  'Chat crash cause of judas spam',
+  'Chat crash from spam',
   'ELBOOOWWW',
   'Labors someone',
   '"REAL" FOOTBALL mention',
