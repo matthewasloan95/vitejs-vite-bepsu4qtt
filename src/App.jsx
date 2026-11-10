@@ -6,6 +6,7 @@ const SEED_STORAGE_KEY = "bingo_player_seed";
 const FREE_SPACE_ID = "__FREE_SPACE__";
 
 // --- Pre-loaded Default Data ---
+const DEFAULT_TITLE = "Yoshi's Stream Bingo";
 const DEFAULT_FREE_SPACE = "yelling at petters";
 
 const DEFAULT_ITEMS = [
@@ -50,6 +51,10 @@ const DEFAULT_ITEMS = [
   "LOcationphobia (NY..LU..etc)",
   "Celebrates a retired T3",
 ].join("\n");
+
+const DEFAULT_ITEMS_LIST = DEFAULT_ITEMS.split("\n")
+  .map((line) => line.trim())
+  .filter((line) => line.length > 0);
 
 // --- Yoshi Egg Color Palette (Classic Yoshi's Island colors) ---
 const YOSHI_PALETTE = [
@@ -162,21 +167,44 @@ function SmileyFlowerIcon({ className = "w-7 h-7" }) {
   );
 }
 
-// --- UTF-8 Safe Base64 URL Encoding / Decoding ---
-function encodePayload(obj) {
+// --- Ultra-Short URL-safe Base64 Encoding / Decoding ---
+function encodeCompact(obj) {
+  if (!obj || Object.keys(obj).length === 0) return "";
   try {
     const json = JSON.stringify(obj);
     const bytes = new TextEncoder().encode(json);
     let binary = "";
     bytes.forEach((b) => (binary += String.fromCharCode(b)));
-    return btoa(binary);
+    return btoa(binary)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
   } catch (e) {
-    console.error("Failed to encode URL payload", e);
+    console.error("Failed to encode compact payload", e);
     return "";
   }
 }
 
-function decodePayload(encoded) {
+function decodeCompact(str) {
+  if (!str) return null;
+  try {
+    let base64 = str.replace(/-/g, "+").replace(/_/g, "/");
+    while (base64.length % 4) base64 += "=";
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    const json = new TextDecoder().decode(bytes);
+    return JSON.parse(json);
+  } catch (e) {
+    console.error("Failed to decode compact payload", e);
+    return null;
+  }
+}
+
+// Backward-compatible decode for old long #config= hashes
+function decodeLegacyPayload(encoded) {
   try {
     const binary = atob(encoded);
     const bytes = new Uint8Array(binary.length);
@@ -186,9 +214,93 @@ function decodePayload(encoded) {
     const json = new TextDecoder().decode(bytes);
     return JSON.parse(json);
   } catch (e) {
-    console.error("Failed to decode URL payload", e);
     return null;
   }
+}
+
+// --- Delta Compression: only store the difference against DEFAULT_ITEMS ---
+function compressConfig({
+  title,
+  freeSpaceText,
+  useFreeSpace,
+  gridSize,
+  allowDuplicatesIfShort,
+  rawList,
+}) {
+  const compact = {};
+
+  if (title && title !== DEFAULT_TITLE) compact.t = title;
+  if (freeSpaceText !== undefined && freeSpaceText !== DEFAULT_FREE_SPACE)
+    compact.fs = freeSpaceText;
+  if (useFreeSpace === false) compact.nf = 1;
+  if (gridSize && gridSize !== 5) compact.g = gridSize;
+  if (allowDuplicatesIfShort === false) compact.nd = 1;
+
+  const currentItems = rawList
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  const currentSet = new Set(currentItems);
+  const defaultSet = new Set(DEFAULT_ITEMS_LIST);
+
+  // Default items removed by the user (stored as simple index numbers: [0, 4, 12])
+  const removedIndices = [];
+  DEFAULT_ITEMS_LIST.forEach((item, index) => {
+    if (!currentSet.has(item)) {
+      removedIndices.push(index);
+    }
+  });
+
+  // Custom items added by the user
+  const addedItems = currentItems.filter((item) => !defaultSet.has(item));
+
+  const isCompletelyCustom =
+    currentItems.length > 0 &&
+    currentItems.every((item) => !defaultSet.has(item));
+
+  if (isCompletelyCustom) {
+    compact.items = currentItems;
+  } else {
+    if (removedIndices.length > 0) compact.rm = removedIndices;
+    if (addedItems.length > 0) compact.add = addedItems;
+  }
+
+  return compact;
+}
+
+function decompressConfig(compact) {
+  if (!compact) return null;
+
+  const title = compact.t !== undefined ? compact.t : DEFAULT_TITLE;
+  const freeSpaceText =
+    compact.fs !== undefined ? compact.fs : DEFAULT_FREE_SPACE;
+  const useFreeSpace = compact.nf !== 1;
+  const gridSize = compact.g !== undefined ? compact.g : 5;
+  const allowDuplicatesIfShort = compact.nd !== 1;
+
+  let items = [...DEFAULT_ITEMS_LIST];
+
+  if (Array.isArray(compact.items)) {
+    items = compact.items;
+  } else {
+    if (Array.isArray(compact.rm) && compact.rm.length > 0) {
+      const rmSet = new Set(compact.rm);
+      items = items.filter((_, idx) => !rmSet.has(idx));
+    }
+    if (Array.isArray(compact.add) && compact.add.length > 0) {
+      items = [...items, ...compact.add];
+    }
+  }
+
+  return {
+    title,
+    freeSpaceText,
+    useFreeSpace,
+    gridSize,
+    allowDuplicatesIfShort,
+    rawList: items.join("\n"),
+  };
 }
 
 // --- Deterministic Seeded PRNG (Mulberry32) ---
@@ -205,7 +317,7 @@ function hashString(str) {
   };
 }
 
-// Stable per-item hash sort: removing 1 item from `array` won't scramble the rest of the pool!
+// Stable per-item hash sort
 function seededSelectPool(array, seedStr) {
   const effectiveSeed = seedStr || "default-seed";
   return [...array]
@@ -221,37 +333,53 @@ function randomSeed() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-// Load initial config synchronously from URL hash OR localStorage,
-// while auto-detecting if DEFAULT_ITEMS or DEFAULT_FREE_SPACE changed in a new GitHub/Vercel deploy
-function getInitialConfig() {
-  if (typeof window !== "undefined") {
-    const hash = window.location.hash;
-    if (hash.startsWith("#config=")) {
-      const decoded = decodePayload(hash.replace("#config=", ""));
-      if (decoded) {
-        return {
-          title: decoded.title ?? "Yoshi's Stream Bingo",
-          freeSpaceText: decoded.freeSpaceText ?? DEFAULT_FREE_SPACE,
-          useFreeSpace: decoded.useFreeSpace ?? true,
-          gridSize: decoded.gridSize ?? 5,
-          allowDuplicatesIfShort: decoded.allowDuplicatesIfShort ?? true,
-          rawList: decoded.rawList ?? DEFAULT_ITEMS,
-        };
-      }
-    }
+// Parse URL config (handles new #c= and legacy #config=)
+function parseUrlConfig() {
+  if (typeof window === "undefined") return null;
+  const hash = window.location.hash;
+  if (!hash) return null;
 
+  if (hash.startsWith("#c=")) {
+    const raw = hash.replace("#c=", "");
+    if (!raw) return decompressConfig({});
+    const compact = decodeCompact(raw);
+    return compact ? decompressConfig(compact) : null;
+  }
+
+  if (hash.startsWith("#config=")) {
+    const legacy = decodeLegacyPayload(hash.replace("#config=", ""));
+    if (legacy) {
+      return {
+        title: legacy.title ?? DEFAULT_TITLE,
+        freeSpaceText: legacy.freeSpaceText ?? DEFAULT_FREE_SPACE,
+        useFreeSpace: legacy.useFreeSpace ?? true,
+        gridSize: legacy.gridSize ?? 5,
+        allowDuplicatesIfShort: legacy.allowDuplicatesIfShort ?? true,
+        rawList: legacy.rawList ?? DEFAULT_ITEMS,
+      };
+    }
+  }
+
+  return null;
+}
+
+function getInitialConfig() {
+  const fromUrl = parseUrlConfig();
+  if (fromUrl) return fromUrl;
+
+  if (typeof window !== "undefined") {
     const saved = localStorage.getItem(CONFIG_STORAGE_KEY);
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
 
-        // Option 1: Check if DEFAULT_ITEMS or DEFAULT_FREE_SPACE in the codebase changed since last visit
+        // Check if code defaults changed in a fresh GitHub deploy
         const codeItemsChanged = parsed.defaultSnapshot !== DEFAULT_ITEMS;
         const codeFreeSpaceChanged =
           parsed.defaultFreeSnapshot !== DEFAULT_FREE_SPACE;
 
         return {
-          title: parsed.title ?? "Yoshi's Stream Bingo",
+          title: parsed.title ?? DEFAULT_TITLE,
           freeSpaceText: codeFreeSpaceChanged
             ? DEFAULT_FREE_SPACE
             : (parsed.freeSpaceText ?? DEFAULT_FREE_SPACE),
@@ -262,14 +390,12 @@ function getInitialConfig() {
             ? DEFAULT_ITEMS
             : (parsed.rawList ?? DEFAULT_ITEMS),
         };
-      } catch (e) {
-        // Fallback below
-      }
+      } catch (e) {}
     }
   }
 
   return {
-    title: "Yoshi's Stream Bingo",
+    title: DEFAULT_TITLE,
     freeSpaceText: DEFAULT_FREE_SPACE,
     useFreeSpace: true,
     gridSize: 5,
@@ -293,7 +419,7 @@ export default function App() {
   const [yoshiColorIdx, setYoshiColorIdx] = useState(0);
 
   // Setup UI state
-  const [setupMode, setSetupMode] = useState("visual"); // "visual" | "raw"
+  const [setupMode, setSetupMode] = useState("visual");
   const [newPromptText, setNewPromptText] = useState("");
 
   // Player-specific state
@@ -304,7 +430,6 @@ export default function App() {
     return randomSeed();
   });
 
-  // Track marked squares by their unique tile ID instead of grid index
   const [markedIds, setMarkedIds] = useState([FREE_SPACE_ID]);
   const [lastSelectedSquare, setLastSelectedSquare] = useState(null);
   const [activeTab, setActiveTab] = useState("play");
@@ -312,7 +437,7 @@ export default function App() {
 
   const currentYoshi = YOSHI_PALETTE[yoshiColorIdx] || YOSHI_PALETTE[0];
 
-  // Persist config changes to localStorage (with code default snapshots) AND sync URL hash if present
+  // Persist to localStorage and sync active URL hash
   useEffect(() => {
     const storagePayload = {
       title,
@@ -326,21 +451,26 @@ export default function App() {
     };
     localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(storagePayload));
 
-    if (window.location.hash.startsWith("#config=")) {
-      const sharePayload = {
+    // If page currently has a config hash, keep it updated with the short format
+    if (
+      window.location.hash.startsWith("#c=") ||
+      window.location.hash.startsWith("#config=")
+    ) {
+      const compact = compressConfig({
         title,
         freeSpaceText,
         useFreeSpace,
         gridSize,
         allowDuplicatesIfShort,
         rawList,
-      };
-      const encoded = encodePayload(sharePayload);
-      window.history.replaceState(null, "", `#config=${encoded}`);
+      });
+      const encoded = encodeCompact(compact);
+      const newHash = encoded ? `#c=${encoded}` : "";
+      window.history.replaceState(null, "", newHash || window.location.pathname);
     }
   }, [title, freeSpaceText, useFreeSpace, gridSize, allowDuplicatesIfShort, rawList]);
 
-  // Parse cleaned lines (deduplicated to keep tile IDs clean)
+  // Clean and deduplicate lines
   const items = useMemo(() => {
     const lines = rawList
       .split("\n")
@@ -353,12 +483,11 @@ export default function App() {
   const centerIndex = gridSize % 2 === 1 ? Math.floor(totalSquares / 2) : 0;
   const neededItems = useFreeSpace ? totalSquares - 1 : totalSquares;
 
-  // Storage key no longer depends on items.length so editing prompts won't wipe progress
   const storageKey = useMemo(() => {
     return `bingo_marked_v2_${seed}_${gridSize}`;
   }, [seed, gridSize]);
 
-  // Load marked squares from localStorage when seed or gridSize changes
+  // Load marks
   useEffect(() => {
     const saved = localStorage.getItem(storageKey);
     if (saved) {
@@ -368,14 +497,12 @@ export default function App() {
           setMarkedIds(parsed);
           return;
         }
-      } catch (e) {
-        // Fallback below
-      }
+      } catch (e) {}
     }
     setMarkedIds(useFreeSpace ? [FREE_SPACE_ID] : []);
   }, [storageKey, useFreeSpace]);
 
-  // Ensure Free Space stays marked if enabled
+  // Ensure Free Space remains marked
   useEffect(() => {
     if (useFreeSpace) {
       setMarkedIds((prev) =>
@@ -384,7 +511,7 @@ export default function App() {
     }
   }, [useFreeSpace]);
 
-  // Save marked square IDs & seed to localStorage
+  // Save marks & seed
   useEffect(() => {
     localStorage.setItem(storageKey, JSON.stringify(markedIds));
   }, [markedIds, storageKey]);
@@ -393,7 +520,7 @@ export default function App() {
     localStorage.setItem(SEED_STORAGE_KEY, seed);
   }, [seed]);
 
-  // Generate the board for this player's seed using stable per-item hashing
+  // Board generation
   const boardSquares = useMemo(() => {
     if (items.length === 0) return [];
 
@@ -456,12 +583,11 @@ export default function App() {
     allowDuplicatesIfShort,
   ]);
 
-  // Set of prompts currently visible on this player's active board
   const activeBoardTextSet = useMemo(() => {
     return new Set(boardSquares.filter((sq) => !sq.isFree).map((sq) => sq.text));
   }, [boardSquares]);
 
-  // Calculate winning lines (rows, cols, diagonals)
+  // Win condition checker
   const winningSquareSet = useMemo(() => {
     if (boardSquares.length < totalSquares) {
       return { winners: new Set(), bingoCount: 0 };
@@ -503,7 +629,6 @@ export default function App() {
     return { winners, bingoCount };
   }, [boardSquares, markedIds, gridSize, totalSquares]);
 
-  // Count how many squares on the current board are marked
   const markedBoardCount = useMemo(() => {
     return boardSquares.filter((sq) => markedIds.includes(sq.id)).length;
   }, [boardSquares, markedIds]);
@@ -550,23 +675,30 @@ export default function App() {
   const handleResetDefaults = () => {
     setRawList(DEFAULT_ITEMS);
     setFreeSpaceText(DEFAULT_FREE_SPACE);
-    if (window.location.hash.startsWith("#config=")) {
+    setTitle(DEFAULT_TITLE);
+    if (
+      window.location.hash.startsWith("#c=") ||
+      window.location.hash.startsWith("#config=")
+    ) {
       window.history.replaceState(null, "", window.location.pathname);
     }
   };
 
+  // Ultra-short Share Link handler
   const handleShareLink = () => {
-    const payload = {
+    const compact = compressConfig({
       title,
       freeSpaceText,
       useFreeSpace,
       gridSize,
       allowDuplicatesIfShort,
       rawList,
-    };
-    const encoded = encodePayload(payload);
-    const url = `${window.location.origin}${window.location.pathname}#config=${encoded}`;
-    window.history.replaceState(null, "", `#config=${encoded}`);
+    });
+    const encoded = encodeCompact(compact);
+    const hash = encoded ? `#c=${encoded}` : "";
+    const url = `${window.location.origin}${window.location.pathname}${hash}`;
+
+    window.history.replaceState(null, "", hash || window.location.pathname);
     navigator.clipboard.writeText(url);
     setCopiedLink(true);
     setTimeout(() => setCopiedLink(false), 2500);
@@ -600,7 +732,7 @@ export default function App() {
             </div>
             <div className="min-w-0">
               <h1 className="text-xl sm:text-3xl font-black tracking-tight text-emerald-800 drop-shadow-sm truncate">
-                {title || "Yoshi's Stream Bingo"}
+                {title || DEFAULT_TITLE}
               </h1>
               <div className="flex flex-wrap items-center gap-2 text-[11px] sm:text-xs font-bold text-emerald-700 mt-0.5">
                 <span className="bg-emerald-200/80 border border-emerald-500 px-2 py-0.5 rounded-full">
@@ -901,7 +1033,7 @@ export default function App() {
                   </span>
                 </div>
 
-                {/* Mode Switcher: Visual vs Bulk Text */}
+                {/* Mode Switcher */}
                 <div className="inline-flex rounded-xl border-2 border-emerald-800 bg-white p-0.5 text-xs font-extrabold">
                   <button
                     type="button"
