@@ -56,7 +56,7 @@ const DEFAULT_ITEMS_LIST = DEFAULT_ITEMS.split("\n")
   .map((line) => line.trim())
   .filter((line) => line.length > 0);
 
-// --- Yoshi Egg Color Palette (Classic Yoshi's Island colors) ---
+// --- Yoshi Egg Color Palette ---
 const YOSHI_PALETTE = [
   {
     name: "Green",
@@ -137,7 +137,7 @@ function YoshiEggIcon({ spotColor = "#22c55e", className = "w-8 h-8" }) {
   );
 }
 
-// --- Custom Inline SVG: Yoshi Smiley Flower (For BINGO lines!) ---
+// --- Custom Inline SVG: Yoshi Smiley Flower ---
 function SmileyFlowerIcon({ className = "w-7 h-7" }) {
   return (
     <svg
@@ -203,7 +203,6 @@ function decodeCompact(str) {
   }
 }
 
-// Backward-compatible decode for old long #config= hashes
 function decodeLegacyPayload(encoded) {
   try {
     const binary = atob(encoded);
@@ -218,7 +217,7 @@ function decodeLegacyPayload(encoded) {
   }
 }
 
-// --- Delta Compression: only store the difference against DEFAULT_ITEMS ---
+// --- Delta Compression: stores setup diffs, card seed, and selected square positions ---
 function compressConfig({
   title,
   freeSpaceText,
@@ -226,6 +225,8 @@ function compressConfig({
   gridSize,
   allowDuplicatesIfShort,
   rawList,
+  seed,
+  markedIndices,
 }) {
   const compact = {};
 
@@ -236,6 +237,12 @@ function compressConfig({
   if (gridSize && gridSize !== 5) compact.g = gridSize;
   if (allowDuplicatesIfShort === false) compact.nd = 1;
 
+  // Include player seed & marked squares
+  if (seed) compact.s = seed;
+  if (Array.isArray(markedIndices) && markedIndices.length > 0) {
+    compact.m = markedIndices;
+  }
+
   const currentItems = rawList
     .split("\n")
     .map((line) => line.trim())
@@ -244,7 +251,6 @@ function compressConfig({
   const currentSet = new Set(currentItems);
   const defaultSet = new Set(DEFAULT_ITEMS_LIST);
 
-  // Default items removed by the user (stored as simple index numbers: [0, 4, 12])
   const removedIndices = [];
   DEFAULT_ITEMS_LIST.forEach((item, index) => {
     if (!currentSet.has(item)) {
@@ -252,7 +258,6 @@ function compressConfig({
     }
   });
 
-  // Custom items added by the user
   const addedItems = currentItems.filter((item) => !defaultSet.has(item));
 
   const isCompletelyCustom =
@@ -279,6 +284,9 @@ function decompressConfig(compact) {
   const gridSize = compact.g !== undefined ? compact.g : 5;
   const allowDuplicatesIfShort = compact.nd !== 1;
 
+  const seed = compact.s || null;
+  const markedIndices = Array.isArray(compact.m) ? compact.m : null;
+
   let items = [...DEFAULT_ITEMS_LIST];
 
   if (Array.isArray(compact.items)) {
@@ -300,10 +308,12 @@ function decompressConfig(compact) {
     gridSize,
     allowDuplicatesIfShort,
     rawList: items.join("\n"),
+    seed,
+    markedIndices,
   };
 }
 
-// --- Deterministic Seeded PRNG (Mulberry32) ---
+// --- Deterministic Seeded PRNG ---
 function hashString(str) {
   let h = 1779033703 ^ str.length;
   for (let i = 0; i < str.length; i++) {
@@ -317,7 +327,6 @@ function hashString(str) {
   };
 }
 
-// Stable per-item hash sort
 function seededSelectPool(array, seedStr) {
   const effectiveSeed = seedStr || "default-seed";
   return [...array]
@@ -333,7 +342,72 @@ function randomSeed() {
   return Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
-// Parse URL config (handles new #c= and legacy #config=)
+// Pure board generation function
+function buildBoardSquares({
+  items,
+  seed,
+  gridSize,
+  useFreeSpace,
+  freeSpaceText,
+  allowDuplicatesIfShort,
+}) {
+  if (!items || items.length === 0) return [];
+
+  const totalSquares = gridSize * gridSize;
+  const centerIndex = gridSize % 2 === 1 ? Math.floor(totalSquares / 2) : 0;
+  const neededItems = useFreeSpace ? totalSquares - 1 : totalSquares;
+
+  let pool = seededSelectPool(items, seed).map((text) => ({
+    id: text,
+    text,
+  }));
+
+  let salt = 1;
+  while (pool.length < neededItems) {
+    if (allowDuplicatesIfShort) {
+      const extra = seededSelectPool(items, `${seed}-dup-${salt}`).map(
+        (text) => ({
+          id: `${text}__dup_${salt}`,
+          text,
+        })
+      );
+      pool = [...pool, ...extra];
+    } else {
+      const bonusNum = pool.length + 1;
+      pool.push({
+        id: `__bonus_${bonusNum}`,
+        text: `Bonus Egg #${bonusNum}`,
+      });
+    }
+    salt++;
+  }
+
+  const selected = pool.slice(0, neededItems);
+  const finalBoard = [];
+  let itemIdx = 0;
+
+  for (let i = 0; i < totalSquares; i++) {
+    if (useFreeSpace && i === centerIndex) {
+      finalBoard.push({
+        index: i,
+        id: FREE_SPACE_ID,
+        text: freeSpaceText || "FREE SPACE",
+        isFree: true,
+      });
+    } else {
+      const chosen = selected[itemIdx++];
+      finalBoard.push({
+        index: i,
+        id: chosen.id,
+        text: chosen.text,
+        isFree: false,
+      });
+    }
+  }
+  return finalBoard;
+}
+
+// Parse configuration from URL
 function parseUrlConfig() {
   if (typeof window === "undefined") return null;
   const hash = window.location.hash;
@@ -356,6 +430,8 @@ function parseUrlConfig() {
         gridSize: legacy.gridSize ?? 5,
         allowDuplicatesIfShort: legacy.allowDuplicatesIfShort ?? true,
         rawList: legacy.rawList ?? DEFAULT_ITEMS,
+        seed: null,
+        markedIndices: null,
       };
     }
   }
@@ -373,7 +449,6 @@ function getInitialConfig() {
       try {
         const parsed = JSON.parse(saved);
 
-        // Check if code defaults changed in a fresh GitHub deploy
         const codeItemsChanged = parsed.defaultSnapshot !== DEFAULT_ITEMS;
         const codeFreeSpaceChanged =
           parsed.defaultFreeSnapshot !== DEFAULT_FREE_SPACE;
@@ -389,6 +464,8 @@ function getInitialConfig() {
           rawList: codeItemsChanged
             ? DEFAULT_ITEMS
             : (parsed.rawList ?? DEFAULT_ITEMS),
+          seed: null,
+          markedIndices: null,
         };
       } catch (e) {}
     }
@@ -401,6 +478,8 @@ function getInitialConfig() {
     gridSize: 5,
     allowDuplicatesIfShort: true,
     rawList: DEFAULT_ITEMS,
+    seed: null,
+    markedIndices: null,
   };
 }
 
@@ -422,56 +501,16 @@ export default function App() {
   const [setupMode, setSetupMode] = useState("visual");
   const [newPromptText, setNewPromptText] = useState("");
 
-  // Player-specific state
+  // Seed state: adopts URL seed when opening a shared link
   const [seed, setSeed] = useState(() => {
+    if (initialConfig.seed) return initialConfig.seed;
     if (typeof window !== "undefined") {
       return localStorage.getItem(SEED_STORAGE_KEY) || randomSeed();
     }
     return randomSeed();
   });
 
-  const [markedIds, setMarkedIds] = useState([FREE_SPACE_ID]);
-  const [lastSelectedSquare, setLastSelectedSquare] = useState(null);
-  const [activeTab, setActiveTab] = useState("play");
-  const [copiedLink, setCopiedLink] = useState(false);
-
-  const currentYoshi = YOSHI_PALETTE[yoshiColorIdx] || YOSHI_PALETTE[0];
-
-  // Persist to localStorage and sync active URL hash
-  useEffect(() => {
-    const storagePayload = {
-      title,
-      freeSpaceText,
-      useFreeSpace,
-      gridSize,
-      allowDuplicatesIfShort,
-      rawList,
-      defaultSnapshot: DEFAULT_ITEMS,
-      defaultFreeSnapshot: DEFAULT_FREE_SPACE,
-    };
-    localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(storagePayload));
-
-    // If page currently has a config hash, keep it updated with the short format
-    if (
-      window.location.hash.startsWith("#c=") ||
-      window.location.hash.startsWith("#config=")
-    ) {
-      const compact = compressConfig({
-        title,
-        freeSpaceText,
-        useFreeSpace,
-        gridSize,
-        allowDuplicatesIfShort,
-        rawList,
-      });
-      const encoded = encodeCompact(compact);
-      const newHash = encoded ? `#c=${encoded}` : "";
-      window.history.replaceState(null, "", newHash || window.location.pathname);
-    }
-  }, [title, freeSpaceText, useFreeSpace, gridSize, allowDuplicatesIfShort, rawList]);
-
-  // Clean and deduplicate lines
-  const items = useMemo(() => {
+  const parsedItems = useMemo(() => {
     const lines = rawList
       .split("\n")
       .map((line) => line.trim())
@@ -479,106 +518,78 @@ export default function App() {
     return Array.from(new Set(lines));
   }, [rawList]);
 
+  // Marked squares state: adopts shared marks from URL if present
+  const [markedIds, setMarkedIds] = useState(() => {
+    if (
+      initialConfig.markedIndices &&
+      Array.isArray(initialConfig.markedIndices)
+    ) {
+      const initialSeed =
+        initialConfig.seed ||
+        (typeof window !== "undefined" &&
+          localStorage.getItem(SEED_STORAGE_KEY)) ||
+        "default";
+      const initialBoard = buildBoardSquares({
+        items: parsedItems,
+        seed: initialSeed,
+        gridSize: initialConfig.gridSize,
+        useFreeSpace: initialConfig.useFreeSpace,
+        freeSpaceText: initialConfig.freeSpaceText,
+        allowDuplicatesIfShort: initialConfig.allowDuplicatesIfShort,
+      });
+      const mapped = initialConfig.markedIndices
+        .map((idx) => initialBoard[idx]?.id)
+        .filter(Boolean);
+      if (mapped.length > 0) return mapped;
+    }
+
+    if (typeof window !== "undefined") {
+      const storedSeed =
+        initialConfig.seed || localStorage.getItem(SEED_STORAGE_KEY);
+      if (storedSeed) {
+        const saved = localStorage.getItem(
+          `bingo_marked_v2_${storedSeed}_${initialConfig.gridSize}`
+        );
+        if (saved) {
+          try {
+            const parsed = JSON.parse(saved);
+            if (Array.isArray(parsed)) return parsed;
+          } catch (e) {}
+        }
+      }
+    }
+    return initialConfig.useFreeSpace ? [FREE_SPACE_ID] : [];
+  });
+
+  const [lastSelectedSquare, setLastSelectedSquare] = useState(null);
+  const [activeTab, setActiveTab] = useState("play");
+  const [copiedLink, setCopiedLink] = useState(false);
+
+  const currentYoshi = YOSHI_PALETTE[yoshiColorIdx] || YOSHI_PALETTE[0];
+  const items = parsedItems;
+
   const totalSquares = gridSize * gridSize;
-  const centerIndex = gridSize % 2 === 1 ? Math.floor(totalSquares / 2) : 0;
   const neededItems = useFreeSpace ? totalSquares - 1 : totalSquares;
 
   const storageKey = useMemo(() => {
     return `bingo_marked_v2_${seed}_${gridSize}`;
   }, [seed, gridSize]);
 
-  // Load marks
-  useEffect(() => {
-    const saved = localStorage.getItem(storageKey);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          setMarkedIds(parsed);
-          return;
-        }
-      } catch (e) {}
-    }
-    setMarkedIds(useFreeSpace ? [FREE_SPACE_ID] : []);
-  }, [storageKey, useFreeSpace]);
-
-  // Ensure Free Space remains marked
-  useEffect(() => {
-    if (useFreeSpace) {
-      setMarkedIds((prev) =>
-        prev.includes(FREE_SPACE_ID) ? prev : [...prev, FREE_SPACE_ID]
-      );
-    }
-  }, [useFreeSpace]);
-
-  // Save marks & seed
-  useEffect(() => {
-    localStorage.setItem(storageKey, JSON.stringify(markedIds));
-  }, [markedIds, storageKey]);
-
-  useEffect(() => {
-    localStorage.setItem(SEED_STORAGE_KEY, seed);
-  }, [seed]);
-
   // Board generation
   const boardSquares = useMemo(() => {
-    if (items.length === 0) return [];
-
-    let pool = seededSelectPool(items, seed).map((text) => ({
-      id: text,
-      text,
-    }));
-
-    let salt = 1;
-    while (pool.length < neededItems) {
-      if (allowDuplicatesIfShort) {
-        const extra = seededSelectPool(items, `${seed}-dup-${salt}`).map(
-          (text) => ({
-            id: `${text}__dup_${salt}`,
-            text,
-          })
-        );
-        pool = [...pool, ...extra];
-      } else {
-        const bonusNum = pool.length + 1;
-        pool.push({
-          id: `__bonus_${bonusNum}`,
-          text: `Bonus Egg #${bonusNum}`,
-        });
-      }
-      salt++;
-    }
-
-    const selected = pool.slice(0, neededItems);
-    const finalBoard = [];
-    let itemIdx = 0;
-
-    for (let i = 0; i < totalSquares; i++) {
-      if (useFreeSpace && i === centerIndex) {
-        finalBoard.push({
-          index: i,
-          id: FREE_SPACE_ID,
-          text: freeSpaceText || "FREE SPACE",
-          isFree: true,
-        });
-      } else {
-        const chosen = selected[itemIdx++];
-        finalBoard.push({
-          index: i,
-          id: chosen.id,
-          text: chosen.text,
-          isFree: false,
-        });
-      }
-    }
-    return finalBoard;
+    return buildBoardSquares({
+      items,
+      seed,
+      gridSize,
+      useFreeSpace,
+      freeSpaceText,
+      allowDuplicatesIfShort,
+    });
   }, [
     items,
     seed,
-    neededItems,
-    totalSquares,
+    gridSize,
     useFreeSpace,
-    centerIndex,
     freeSpaceText,
     allowDuplicatesIfShort,
   ]);
@@ -633,6 +644,66 @@ export default function App() {
     return boardSquares.filter((sq) => markedIds.includes(sq.id)).length;
   }, [boardSquares, markedIds]);
 
+  // Save progress & keep active hash synchronized
+  useEffect(() => {
+    const currentMarkedIndices = boardSquares
+      .filter((sq) => markedIds.includes(sq.id))
+      .map((sq) => sq.index);
+
+    const storagePayload = {
+      title,
+      freeSpaceText,
+      useFreeSpace,
+      gridSize,
+      allowDuplicatesIfShort,
+      rawList,
+      defaultSnapshot: DEFAULT_ITEMS,
+      defaultFreeSnapshot: DEFAULT_FREE_SPACE,
+    };
+    localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(storagePayload));
+    localStorage.setItem(storageKey, JSON.stringify(markedIds));
+    localStorage.setItem(SEED_STORAGE_KEY, seed);
+
+    if (
+      window.location.hash.startsWith("#c=") ||
+      window.location.hash.startsWith("#config=")
+    ) {
+      const compact = compressConfig({
+        title,
+        freeSpaceText,
+        useFreeSpace,
+        gridSize,
+        allowDuplicatesIfShort,
+        rawList,
+        seed,
+        markedIndices: currentMarkedIndices,
+      });
+      const encoded = encodeCompact(compact);
+      const newHash = encoded ? `#c=${encoded}` : "";
+      window.history.replaceState(null, "", newHash || window.location.pathname);
+    }
+  }, [
+    title,
+    freeSpaceText,
+    useFreeSpace,
+    gridSize,
+    allowDuplicatesIfShort,
+    rawList,
+    seed,
+    markedIds,
+    boardSquares,
+    storageKey,
+  ]);
+
+  // Ensure Free Space remains marked
+  useEffect(() => {
+    if (useFreeSpace) {
+      setMarkedIds((prev) =>
+        prev.includes(FREE_SPACE_ID) ? prev : [...prev, FREE_SPACE_ID]
+      );
+    }
+  }, [useFreeSpace]);
+
   // Handlers
   const toggleSquare = (sq) => {
     if (typeof navigator !== "undefined" && navigator.vibrate) {
@@ -684,8 +755,12 @@ export default function App() {
     }
   };
 
-  // Ultra-short Share Link handler
+  // Share link handler: includes current seed + selected square indices
   const handleShareLink = () => {
+    const currentMarkedIndices = boardSquares
+      .filter((sq) => markedIds.includes(sq.id))
+      .map((sq) => sq.index);
+
     const compact = compressConfig({
       title,
       freeSpaceText,
@@ -693,6 +768,8 @@ export default function App() {
       gridSize,
       allowDuplicatesIfShort,
       rawList,
+      seed,
+      markedIndices: currentMarkedIndices,
     });
     const encoded = encodeCompact(compact);
     const hash = encoded ? `#c=${encoded}` : "";
@@ -721,7 +798,7 @@ export default function App() {
       </div>
 
       <div className="max-w-3xl mx-auto space-y-3 sm:space-y-5 relative z-10">
-        {/* Yoshi's Island Wooden Signpost / Egg Header */}
+        {/* Yoshi's Island Wooden Signpost / Header */}
         <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 sm:gap-4 bg-[#fefce8] border-4 border-emerald-800 p-3 sm:p-4 rounded-3xl shadow-[0_6px_0_0_#14532d] sm:shadow-[0_8px_0_0_#14532d]">
           <div className="flex items-center gap-2.5 sm:gap-3">
             <div className="shrink-0 drop-shadow">
@@ -743,7 +820,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Mobile-friendly 3-column action bar */}
+          {/* Action Bar */}
           <div className="grid grid-cols-3 sm:flex items-center gap-1.5 sm:gap-2 w-full sm:w-auto">
             <button
               onClick={() => setActiveTab("play")}
@@ -767,6 +844,7 @@ export default function App() {
             </button>
             <button
               onClick={handleShareLink}
+              title="Share card and currently selected squares"
               className="px-2.5 sm:px-4 py-2 rounded-2xl text-xs sm:text-sm font-extrabold bg-rose-500 hover:bg-rose-400 text-white border-2 border-rose-900 shadow-[0_3px_0_0_#881337] active:translate-y-0.5 transition-all touch-manipulation"
             >
               {copiedLink ? "✓ Copied!" : "🍎 Share"}
@@ -799,7 +877,7 @@ export default function App() {
           </div>
         )}
 
-        {/* BINGO Banner (Smiley Flower Theme!) */}
+        {/* BINGO Banner */}
         {winningSquareSet.bingoCount > 0 && activeTab === "play" && (
           <div className="bg-amber-300 border-4 border-amber-800 rounded-3xl p-2.5 sm:p-4 text-center shadow-[0_5px_0_0_#78350f] flex items-center justify-center gap-2 sm:gap-3 animate-bounce">
             <SmileyFlowerIcon className="w-7 h-7 sm:w-9 sm:h-9 shrink-0" />
@@ -814,7 +892,7 @@ export default function App() {
         {/* PLAY VIEW */}
         {activeTab === "play" && (
           <div className="space-y-2.5 sm:space-y-4">
-            {/* BINGO Header Letters */}
+            {/* Header Letters */}
             {gridSize === 5 && (
               <div className="grid grid-cols-5 gap-1 sm:gap-3 px-1.5 sm:px-4">
                 {["Y", "O", "S", "H", "I"].map((letter, i) => (
@@ -858,7 +936,7 @@ export default function App() {
                         : "bg-white border-emerald-800/80 text-emerald-950 shadow-[0_3px_0_0_#166534] sm:shadow-[0_5px_0_0_#166534] hover:-translate-y-0.5 hover:bg-lime-50 active:translate-y-0.5"
                     }`}
                   >
-                    {/* Faint Spotted Egg Watermark when marked */}
+                    {/* Faint Egg Watermark when marked */}
                     {isMarked && (
                       <div className="absolute inset-0 flex items-center justify-center opacity-25 pointer-events-none">
                         <YoshiEggIcon
@@ -868,7 +946,7 @@ export default function App() {
                       </div>
                     )}
 
-                    {/* Free Space Header Badge */}
+                    {/* Free Space Badge */}
                     {sq.isFree && (
                       <span className="relative z-10 text-[7px] sm:text-[10px] font-black uppercase tracking-tight sm:tracking-wider px-1 sm:px-2 py-0 sm:py-0.5 rounded-full bg-rose-500 text-white border border-rose-900 mb-0.5 sm:mb-1 shadow-sm leading-tight">
                         ★ FREE ★
@@ -888,7 +966,7 @@ export default function App() {
                       {sq.text}
                     </span>
 
-                    {/* Corner Stamp Badge when Marked */}
+                    {/* Corner Egg/Flower Stamp Badge */}
                     {isMarked && (
                       <div className="absolute top-0.5 right-0.5 sm:top-1 sm:right-1 z-20">
                         {isWinningSquare ? (
@@ -906,7 +984,7 @@ export default function App() {
               })}
             </div>
 
-            {/* Mobile Full-Text Prompt Reader Bar */}
+            {/* Mobile Prompt Preview Bar */}
             {lastSelectedSquare && (
               <div className="flex items-center justify-between gap-2 bg-white/90 backdrop-blur border-2 border-emerald-800 px-3 py-2 rounded-2xl text-xs font-bold text-emerald-950 shadow-sm">
                 <div className="flex items-center gap-2 min-w-0">
@@ -927,7 +1005,7 @@ export default function App() {
               </div>
             )}
 
-            {/* Bottom Controls */}
+            {/* Controls */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3 bg-[#fefce8] border-4 border-emerald-900 p-3 sm:p-4 rounded-3xl shadow-[0_6px_0_0_#14532d]">
               <div className="grid grid-cols-2 sm:flex items-center gap-2">
                 <button
@@ -1015,7 +1093,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Prompt Editor Section */}
+            {/* Prompt Editor */}
             <div className="space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
@@ -1033,7 +1111,6 @@ export default function App() {
                   </span>
                 </div>
 
-                {/* Mode Switcher */}
                 <div className="inline-flex rounded-xl border-2 border-emerald-800 bg-white p-0.5 text-xs font-extrabold">
                   <button
                     type="button"
@@ -1062,7 +1139,6 @@ export default function App() {
 
               {setupMode === "visual" ? (
                 <div className="space-y-2.5">
-                  {/* Add New Prompt Bar */}
                   <form onSubmit={handleAddSinglePrompt} className="flex gap-2">
                     <input
                       type="text"
@@ -1079,7 +1155,6 @@ export default function App() {
                     </button>
                   </form>
 
-                  {/* Scrollable Visual Tile List */}
                   <div className="max-h-72 overflow-y-auto rounded-2xl bg-white border-2 border-emerald-800 divide-y divide-emerald-100 p-1.5">
                     {items.length === 0 ? (
                       <div className="p-6 text-center text-sm font-bold text-emerald-700">
